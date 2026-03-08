@@ -5,7 +5,7 @@ const path = require('path');
 const db = require('./database');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -15,244 +15,234 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, '../index.html')));
 
 // --- AUTHENTICATION API ---
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
-    db.get("SELECT id, username, role, phone FROM users WHERE username = ? AND password = ?", [username, password], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!row) return res.status(401).json({ error: "Invalid credentials" });
-        res.json({ success: true, user: row });
-    });
+    try {
+        const [rows] = await db.query("SELECT id, username, role, phone FROM users WHERE username = ? AND password = ?", [username, password]);
+        if (rows.length === 0) return res.status(401).json({ error: "Invalid credentials" });
+        res.json({ success: true, user: rows[0] });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/signup', (req, res) => {
+app.post('/api/signup', async (req, res) => {
     const { username, password } = req.body;
-    db.run("INSERT INTO users (username, password, role) VALUES (?, ?, 'driver')", [username, password], function (err) {
-        if (err) {
-            if (err.message.includes('UNIQUE')) return res.status(400).json({ error: "Username already exists" });
-            return res.status(500).json({ error: err.message });
-        }
-        res.json({ success: true, message: "Account created successfully. You can now login.", user_id: this.lastID });
-    });
+    try {
+        const [result] = await db.query("INSERT INTO users (username, password, role) VALUES (?, ?, 'driver')", [username, password]);
+        res.json({ success: true, message: "Account created successfully. You can now login.", user_id: result.insertId });
+    } catch(err) {
+        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: "Username already exists" });
+        return res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/user/phone', (req, res) => {
+app.post('/api/user/phone', async (req, res) => {
     const { user_id, phone } = req.body;
-    db.run("UPDATE users SET phone = ? WHERE id = ?", [phone, user_id], function (err) {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        await db.query("UPDATE users SET phone = ? WHERE id = ?", [phone, user_id]);
         res.json({ success: true });
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 
 // --- ADMIN API ---
-app.get('/api/admin/users', (req, res) => {
+app.get('/api/admin/users', async (req, res) => {
     const sql = `
         SELECT u.id, u.username, u.phone, 
-               json_group_array(
-                   json_object('license_plate', v.license_plate, 'make_model', v.make_model, 'type', v.type)
+               COALESCE(
+                   JSON_ARRAYAGG(
+                       JSON_OBJECT('license_plate', v.license_plate, 'make_model', v.make_model, 'type', v.type)
+                   ), '[]'
                ) as vehicles
         FROM users u
         LEFT JOIN vehicles v ON u.id = v.owner_id
         WHERE u.role = 'driver'
         GROUP BY u.id
     `;
-    db.all(sql, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        const parsed = rows.map(r => ({
-            ...r,
-            vehicles: JSON.parse(r.vehicles).filter(v => v.license_plate !== null)
-        }));
+    try {
+        const [rows] = await db.query(sql);
+        const parsed = rows.map(r => {
+            // Unpack JSON string or array safely if using MySQL driver stringify
+            let parsedVehicles = typeof r.vehicles === 'string' ? JSON.parse(r.vehicles) : r.vehicles;
+            if(!Array.isArray(parsedVehicles)) parsedVehicles = [parsedVehicles];
+            
+            return {
+                ...r,
+                vehicles: parsedVehicles.filter(v => v !== null && v.license_plate)
+            };
+        });
         res.json(parsed);
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/lots', (req, res) => {
+app.post('/api/lots', async (req, res) => {
     let { name, address, total_slots } = req.body;
     total_slots = parseInt(total_slots, 10);
-
-    db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-        db.run("INSERT INTO parking_lots (name, address, total_slots) VALUES (?, ?, ?)",
-            [name, address, total_slots], function (err) {
-                if (err) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({ error: err.message });
-                }
-
-                const lotId = this.lastID;
-                const stmt = db.prepare("INSERT INTO parking_slots (lot_id, slot_number, slot_type) VALUES (?, ?, 'car')");
-
-                // Collect all insertions into an array of Promises so we don't return res.json early.
-                const insertions = [];
-                for (let i = 1; i <= total_slots; i++) {
-                    insertions.push(new Promise((resolve, reject) => {
-                        stmt.run(lotId, `A-${i}`, (err) => {
-                            if (err) reject(err);
-                            else resolve();
-                        });
-                    }));
-                }
-
-                Promise.all(insertions).then(() => {
-                    stmt.finalize();
-                    db.run("COMMIT", (err) => {
-                        if (err) return res.status(500).json({ error: err.message });
-                        res.json({ success: true, message: "Lot and slots created successfully" });
-                    });
-                }).catch(e => {
-                    stmt.finalize();
-                    db.run("ROLLBACK");
-                    res.status(500).json({ error: e.message });
-                });
-            });
-    });
+    
+    // Grab single connection for transaction safely
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+        const [result] = await conn.query("INSERT INTO parking_lots (name, address, total_slots) VALUES (?, ?, ?)", [name, address, total_slots]);
+        const lotId = result.insertId;
+        
+        const insertions = [];
+        for (let i = 1; i <= total_slots; i++) {
+            insertions.push(conn.query("INSERT INTO parking_slots (lot_id, slot_number, slot_type) VALUES (?, ?, 'car')", [lotId, `A-${i}`]));
+        }
+        
+        await Promise.all(insertions);
+        await conn.commit();
+        res.json({ success: true, message: "Lot and slots created successfully" });
+    } catch(e) {
+        await conn.rollback();
+        res.status(500).json({ error: e.message });
+    } finally {
+        conn.release();
+    }
 });
 
-app.delete('/api/lots/:id', (req, res) => {
+app.delete('/api/lots/:id', async (req, res) => {
     const lotId = req.params.id;
-    db.serialize(() => {
-        db.run("BEGIN TRANSACTION");
-        // Delete all slots inside first
-        db.run("DELETE FROM parking_slots WHERE lot_id = ?", [lotId], function (err) {
-            if (err) {
-                db.run("ROLLBACK");
-                return res.status(500).json({ error: err.message });
-            }
-            // Now delete the lot itself
-            db.run("DELETE FROM parking_lots WHERE id = ?", [lotId], function (err) {
-                if (err) {
-                    db.run("ROLLBACK");
-                    return res.status(500).json({ error: err.message });
-                }
-                db.run("COMMIT", (err) => {
-                    if (err) return res.status(500).json({ error: err.message });
-                    res.json({ success: true, message: "Parking Lot structurally deleted." });
-                });
-            });
-        });
-    });
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+        await conn.query("DELETE FROM parking_slots WHERE lot_id = ?", [lotId]);
+        await conn.query("DELETE FROM parking_lots WHERE id = ?", [lotId]);
+        await conn.commit();
+        res.json({ success: true, message: "Parking Lot structurally deleted." });
+    } catch(e) {
+        await conn.rollback();
+        res.status(500).json({ error: e.message });
+    } finally {
+        conn.release();
+    }
 });
 
-app.put('/api/slots/:slotId', (req, res) => {
+app.put('/api/slots/:slotId', async (req, res) => {
     const { slotId } = req.params;
     const { slot_type } = req.body;
-
-    db.get("SELECT status FROM parking_slots WHERE id = ?", [slotId], (err, row) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!row) return res.status(404).json({ error: "Slot not found" });
-        if (row.status !== 'available') return res.status(400).json({ error: "Cannot change type of an occupied or reserved slot." });
-
-        db.run("UPDATE parking_slots SET slot_type = ? WHERE id = ?", [slot_type, slotId], function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true });
-        });
-    });
+    try {
+        const [rows] = await db.query("SELECT status FROM parking_slots WHERE id = ?", [slotId]);
+        if (rows.length === 0) return res.status(404).json({ error: "Slot not found" });
+        if (rows[0].status !== 'available') return res.status(400).json({ error: "Cannot change type of an occupied or reserved slot." });
+        
+        await db.query("UPDATE parking_slots SET slot_type = ? WHERE id = ?", [slot_type, slotId]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/admin/slots/:slotId/status', (req, res) => {
+app.put('/api/admin/slots/:slotId/status', async (req, res) => {
     const { slotId } = req.params;
-    const { status } = req.body; // 'available', 'occupied', 'reserved'
-
-    // If Admin forces to available, we MUST nullify foreign constraints automatically
-    if (status === 'available') {
-        db.run("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?",
-            [slotId], function (err) {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ success: true, message: "Slot forcefully liberated." });
-            });
-    } else {
-        // Force to occupied or reserved, no specific driver attached automatically
-        db.run("UPDATE parking_slots SET status = ?, driver_id = NULL, vehicle_id = NULL WHERE id = ?",
-            [status, slotId], function (err) {
-                if (err) return res.status(500).json({ error: err.message });
-                res.json({ success: true, message: `Slot forced to ${status}.` });
-            });
+    const { status } = req.body; 
+    try {
+        if (status === 'available') {
+            await db.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slotId]);
+            res.json({ success: true, message: "Slot forcefully liberated." });
+        } else {
+            await db.query("UPDATE parking_slots SET status = ?, driver_id = NULL, vehicle_id = NULL WHERE id = ?", [status, slotId]);
+            res.json({ success: true, message: `Slot forced to ${status}.` });
+        }
+    } catch(err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
 
 // --- VEHICLE API ---
-app.get('/api/vehicles/:userId', (req, res) => {
-    db.all("SELECT * FROM vehicles WHERE owner_id = ?", [req.params.userId], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+app.get('/api/vehicles/:userId', async (req, res) => {
+    try {
+        const [rows] = await db.query("SELECT * FROM vehicles WHERE owner_id = ?", [req.params.userId]);
         res.json(rows);
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/vehicles', (req, res) => {
+app.post('/api/vehicles', async (req, res) => {
     const { owner_id, license_plate, type, make_model } = req.body;
-    db.run("INSERT INTO vehicles (owner_id, license_plate, type, make_model) VALUES (?, ?, ?, ?)",
-        [owner_id, license_plate, type, make_model], function (err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, message: "Vehicle added" });
-        });
+    try {
+        await db.query("INSERT INTO vehicles (owner_id, license_plate, type, make_model) VALUES (?, ?, ?, ?)", [owner_id, license_plate, type, make_model]);
+        res.json({ success: true, message: "Vehicle added" });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 
 // --- DRIVER API ---
-app.get('/api/lots', (req, res) => {
-    // Fixed bug: left join to not duplicate counting
+app.get('/api/lots', async (req, res) => {
     const sql = `
         SELECT 
             l.id as lot_id, l.name, l.address, l.total_slots,
             COUNT(s.id) as total,
-            SUM(CASE WHEN s.status = 'available' THEN 1 ELSE 0 END) as available_slots
+            CAST(SUM(CASE WHEN s.status = 'available' THEN 1 ELSE 0 END) AS UNSIGNED) as available_slots
         FROM parking_lots l
         LEFT JOIN parking_slots s ON l.id = s.lot_id
         GROUP BY l.id
     `;
-    db.all(sql, [], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        const [rows] = await db.query(sql);
         res.json(rows);
-    });
+    } catch(err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/lots/:id/slots', (req, res) => {
+app.get('/api/lots/:id/slots', async (req, res) => {
     const lotId = req.params.id;
-    db.all("SELECT * FROM parking_slots WHERE lot_id = ?", [lotId], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        const [rows] = await db.query("SELECT * FROM parking_slots WHERE lot_id = ?", [lotId]);
         res.json(rows);
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/reserve', (req, res) => {
+app.post('/api/reserve', async (req, res) => {
     const { slot_id, driver_id, vehicle_id, action_type, time } = req.body;
+    try {
+        const [vRow] = await db.query("SELECT type FROM vehicles WHERE id = ?", [vehicle_id]);
+        if (vRow.length === 0) return res.status(400).json({ error: "Vehicle not found" });
 
-    // First, verify slot type matches vehicle type
-    db.get("SELECT type FROM vehicles WHERE id = ?", [vehicle_id], (err, vRow) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (!vRow) return res.status(400).json({ error: "Vehicle not found" });
-
-        db.get("SELECT status, slot_type FROM parking_slots WHERE id = ?", [slot_id], (err, sRow) => {
-            if (err) return res.status(500).json({ error: err.message });
-            if (!sRow || sRow.status !== 'available') return res.status(400).json({ error: "Slot not available" });
-
-            if (vRow.type !== sRow.slot_type) {
-                return res.status(400).json({ error: `Cannot park a ${vRow.type} in a ${sRow.slot_type} slot.` });
-            }
-
-            // Execute Reservation
-            let status = action_type === 'now' ? 'occupied' : 'reserved';
-            let reserved_time = action_type === 'now' ? null : time;
-
-            db.run("UPDATE parking_slots SET status = ?, driver_id = ?, vehicle_id = ?, reserved_time = ? WHERE id = ?",
-                [status, driver_id, vehicle_id, reserved_time, slot_id], function (err) {
-                    if (err) return res.status(500).json({ error: err.message });
-                    res.json({ success: true, message: "Slot secured successfully" });
-                });
-        });
-    });
+        const [sRow] = await db.query("SELECT status, slot_type FROM parking_slots WHERE id = ?", [slot_id]);
+        if (sRow.length === 0 || sRow[0].status !== 'available') return res.status(400).json({ error: "Slot not available" });
+        
+        if (vRow[0].type !== sRow[0].slot_type) {
+            return res.status(400).json({ error: `Cannot park a ${vRow[0].type} in a ${sRow[0].slot_type} slot.` });
+        }
+        
+        let status = action_type === 'now' ? 'occupied' : 'reserved';
+        let reserved_time = action_type === 'now' ? null : time;
+        
+        await db.query("UPDATE parking_slots SET status = ?, driver_id = ?, vehicle_id = ?, reserved_time = ? WHERE id = ?", 
+        [status, driver_id, vehicle_id, reserved_time, slot_id]);
+        
+        res.json({ success: true, message: "Slot secured successfully" });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/release', (req, res) => {
+app.post('/api/release', async (req, res) => {
     const { slot_id } = req.body;
-    db.run("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slot_id], function (err) {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        await db.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slot_id]);
         res.json({ success: true, message: "Slot released successfully" });
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/my-sessions/:userId', (req, res) => {
+app.get('/api/my-sessions/:userId', async (req, res) => {
     const userId = req.params.userId;
     const sql = `
         SELECT s.id as slot_id, s.slot_number, s.status, s.reserved_time, 
@@ -263,10 +253,12 @@ app.get('/api/my-sessions/:userId', (req, res) => {
         LEFT JOIN vehicles v ON s.vehicle_id = v.id
         WHERE s.driver_id = ? AND s.status IN ('occupied', 'reserved')
     `;
-    db.all(sql, [userId], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    try {
+        const [rows] = await db.query(sql, [userId]);
         res.json(rows);
-    });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.listen(PORT, () => {

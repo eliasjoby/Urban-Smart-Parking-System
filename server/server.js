@@ -54,11 +54,22 @@ app.get('/api/admin/users', async (req, res) => {
         SELECT u.id, u.username, u.phone, 
                COALESCE(
                    JSON_ARRAYAGG(
-                       JSON_OBJECT('license_plate', v.license_plate, 'make_model', v.make_model, 'type', v.type)
+                       JSON_OBJECT(
+                           'id', v.id,
+                           'license_plate', v.license_plate, 
+                           'make_model', v.make_model, 
+                           'type', v.type,
+                           'parked_slot', s.slot_number,
+                           'parked_lot', l.name,
+                           'entry_time', ps.entry_time
+                       )
                    ), '[]'
                ) as vehicles
         FROM users u
         LEFT JOIN vehicles v ON u.id = v.owner_id
+        LEFT JOIN parking_sessions ps ON v.id = ps.vehicle_id AND ps.status = 'active'
+        LEFT JOIN parking_slots s ON ps.slot_id = s.id
+        LEFT JOIN parking_lots l ON s.lot_id = l.id
         WHERE u.role = 'driver'
         GROUP BY u.id
     `;
@@ -77,6 +88,59 @@ app.get('/api/admin/users', async (req, res) => {
         res.json(parsed);
     } catch(err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/admin/sessions', async (req, res) => {
+    const sql = `
+        SELECT ps.id, ps.entry_time, ps.exit_time, ps.status,
+               u.username, u.phone,
+               v.license_plate, v.type as vehicle_type,
+               s.slot_number,
+               l.name as lot_name,
+               ps.duration_hours
+        FROM parking_sessions ps
+        JOIN users u ON ps.user_id = u.id
+        JOIN vehicles v ON ps.vehicle_id = v.id
+        JOIN parking_slots s ON ps.slot_id = s.id
+        JOIN parking_lots l ON s.lot_id = l.id
+        ORDER BY ps.entry_time DESC
+    `;
+    try {
+        const [rows] = await db.query(sql);
+        res.json(rows);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+    const userId = req.params.id;
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Close any active sessions right now
+        await conn.query("UPDATE parking_sessions SET exit_time = CURRENT_TIMESTAMP, status = 'completed' WHERE user_id = ? AND status = 'active'", [userId]);
+
+        // Find all vehicles owned by this user
+        const [vehicles] = await conn.query("SELECT id FROM vehicles WHERE owner_id = ?", [userId]);
+        for (let v of vehicles) {
+            // Free any slots occupied by these vehicles
+            await conn.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE vehicle_id = ?", [v.id]);
+        }
+
+        // The database schema automatically cascades vehicle deletion and session linkage when deleting a user, 
+        // so we just cleanly wipe the user now.
+        await conn.query("DELETE FROM users WHERE id = ?", [userId]);
+
+        await conn.commit();
+        res.json({ success: true, message: "User securely deleted." });
+    } catch(err) {
+        await conn.rollback();
+        res.status(500).json({ error: err.message });
+    } finally {
+        conn.release();
     }
 });
 
@@ -145,6 +209,7 @@ app.put('/api/admin/slots/:slotId/status', async (req, res) => {
     try {
         if (status === 'available') {
             await db.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slotId]);
+            await db.query("UPDATE parking_sessions SET exit_time = CURRENT_TIMESTAMP, status = 'completed' WHERE slot_id = ? AND status = 'active'", [slotId]);
             res.json({ success: true, message: "Slot forcefully liberated." });
         } else {
             await db.query("UPDATE parking_slots SET status = ?, driver_id = NULL, vehicle_id = NULL WHERE id = ?", [status, slotId]);
@@ -173,6 +238,35 @@ app.post('/api/vehicles', async (req, res) => {
         res.json({ success: true, message: "Vehicle added" });
     } catch(err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/vehicles/:id', async (req, res) => {
+    const vehicleId = req.params.id;
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        // Check if the vehicle is currently parked anywhere
+        const [slots] = await conn.query("SELECT id FROM parking_slots WHERE vehicle_id = ?", [vehicleId]);
+        for (const slot of slots) {
+            // Free the slot
+            await conn.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slot.id]);
+        }
+
+        // Close any active sessions
+        await conn.query("UPDATE parking_sessions SET exit_time = CURRENT_TIMESTAMP, status = 'completed' WHERE vehicle_id = ? AND status = 'active'", [vehicleId]);
+
+        // Actually delete the vehicle
+        await conn.query("DELETE FROM vehicles WHERE id = ?", [vehicleId]);
+
+        await conn.commit();
+        res.json({ success: true, message: "Vehicle deleted and related parking sessions closed." });
+    } catch (e) {
+        await conn.rollback();
+        res.status(500).json({ error: e.message });
+    } finally {
+        conn.release();
     }
 });
 
@@ -208,37 +302,67 @@ app.get('/api/lots/:id/slots', async (req, res) => {
 });
 
 app.post('/api/reserve', async (req, res) => {
-    const { slot_id, driver_id, vehicle_id, action_type, time } = req.body;
+    const { slot_id, driver_id, vehicle_id, action_type, time, duration_hours } = req.body;
+    
+    const conn = await db.getConnection();
     try {
-        const [vRow] = await db.query("SELECT type FROM vehicles WHERE id = ?", [vehicle_id]);
-        if (vRow.length === 0) return res.status(400).json({ error: "Vehicle not found" });
+        await conn.beginTransaction();
 
-        const [sRow] = await db.query("SELECT status, slot_type FROM parking_slots WHERE id = ?", [slot_id]);
-        if (sRow.length === 0 || sRow[0].status !== 'available') return res.status(400).json({ error: "Slot not available" });
+        const [vRow] = await conn.query("SELECT type FROM vehicles WHERE id = ?", [vehicle_id]);
+        if (vRow.length === 0) {
+            await conn.rollback();
+            return res.status(400).json({ error: "Vehicle not found" });
+        }
+
+        const [sRow] = await conn.query("SELECT status, slot_type FROM parking_slots WHERE id = ? FOR UPDATE", [slot_id]);
+        if (sRow.length === 0 || sRow[0].status !== 'available') {
+            await conn.rollback();
+            return res.status(400).json({ error: "Slot not available" });
+        }
         
         if (vRow[0].type !== sRow[0].slot_type) {
+            await conn.rollback();
             return res.status(400).json({ error: `Cannot park a ${vRow[0].type} in a ${sRow[0].slot_type} slot.` });
         }
         
         let status = action_type === 'now' ? 'occupied' : 'reserved';
         let reserved_time = action_type === 'now' ? null : time;
         
-        await db.query("UPDATE parking_slots SET status = ?, driver_id = ?, vehicle_id = ?, reserved_time = ? WHERE id = ?", 
+        await conn.query("UPDATE parking_slots SET status = ?, driver_id = ?, vehicle_id = ?, reserved_time = ? WHERE id = ?", 
         [status, driver_id, vehicle_id, reserved_time, slot_id]);
+
+        // Create a new active session
+        await conn.query("INSERT INTO parking_sessions (user_id, vehicle_id, slot_id, duration_hours, status) VALUES (?, ?, ?, ?, 'active')", [driver_id, vehicle_id, slot_id, duration_hours || null]);
         
+        await conn.commit();
         res.json({ success: true, message: "Slot secured successfully" });
     } catch(err) {
+        await conn.rollback();
         res.status(500).json({ error: err.message });
+    } finally {
+        conn.release();
     }
 });
 
 app.post('/api/release', async (req, res) => {
     const { slot_id } = req.body;
+    
+    const conn = await db.getConnection();
     try {
-        await db.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slot_id]);
+        await conn.beginTransaction();
+
+        await conn.query("UPDATE parking_slots SET status = 'available', driver_id = NULL, vehicle_id = NULL, reserved_time = NULL WHERE id = ?", [slot_id]);
+        
+        // Finalize the active session for this slot
+        await conn.query("UPDATE parking_sessions SET exit_time = CURRENT_TIMESTAMP, status = 'completed' WHERE slot_id = ? AND status = 'active'", [slot_id]);
+
+        await conn.commit();
         res.json({ success: true, message: "Slot released successfully" });
     } catch(err) {
+        await conn.rollback();
         res.status(500).json({ error: err.message });
+    } finally {
+        conn.release();
     }
 });
 
@@ -247,10 +371,12 @@ app.get('/api/my-sessions/:userId', async (req, res) => {
     const sql = `
         SELECT s.id as slot_id, s.slot_number, s.status, s.reserved_time, 
                l.name as lot_name, l.address,
-               v.license_plate, v.make_model
+               v.license_plate, v.make_model,
+               ps.entry_time
         FROM parking_slots s
         JOIN parking_lots l ON s.lot_id = l.id
         LEFT JOIN vehicles v ON s.vehicle_id = v.id
+        LEFT JOIN parking_sessions ps ON s.id = ps.slot_id AND ps.status = 'active'
         WHERE s.driver_id = ? AND s.status IN ('occupied', 'reserved')
     `;
     try {

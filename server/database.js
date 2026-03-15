@@ -55,6 +55,21 @@ async function initDB() {
             FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL
         )`);
 
+        // 5. Parking Sessions Table (Entry/Exit Tracking)
+        await pool.query(`CREATE TABLE IF NOT EXISTS parking_sessions (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            vehicle_id INT NOT NULL,
+            slot_id INT NOT NULL,
+            entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            exit_time TIMESTAMP NULL,
+            duration_hours INT DEFAULT NULL,
+            status ENUM('active', 'completed') DEFAULT 'active',
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE,
+            FOREIGN KEY (slot_id) REFERENCES parking_slots(id) ON DELETE CASCADE
+        )`);
+
         // Insert Admin User if it doesn't exist
         const [rows] = await pool.query("SELECT id FROM users WHERE username = ?", ["admin"]);
         if (rows.length === 0) {

@@ -49,7 +49,7 @@
                     <p style="color:var(--text-muted); font-size: 0.875rem; margin-bottom: 1rem;">Please provide a phone number before registering vehicles.</p>
                     <form id="phone-form">
                         <div class="form-group">
-                            <input type="tel" id="user-phone" placeholder="e.g. 555-0100" required>
+                            <input type="text" id="user-phone" pattern="\d{10}" title="Please enter exactly 10 digits" placeholder="e.g. 9876543210" required>
                         </div>
                         <button class="btn" style="width:100%; padding:0.5rem;">Save Number</button>
                     </form>
@@ -124,6 +124,11 @@
                 <div class="form-group hidden" id="reserve-time-container">
                     <label>Arrival Time</label>
                     <input type="datetime-local" id="modal-time" style="color-scheme: dark;">
+
+                    <div style="margin-top: 1rem;">
+                        <label>Duration (Hours)</label>
+                        <input type="number" id="modal-duration-hours" min="1" max="72" value="1" style="width: 100%; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #334155; background-color: #0f172a; color: white;">
+                    </div>
                 </div>
 
                 <div style="display: flex; gap: 1rem; margin-top: 2rem;">
@@ -163,7 +168,7 @@
                 phoneSec.style.display = 'none';
                 vehicleSec.style.display = 'block';
                 await loadVehicles();
-            } catch(e) { alert(e.message); }
+            } catch(e) { await showAlert(e.message); }
         };
 
         // Add Vehicle
@@ -178,7 +183,7 @@
                 });
                 document.getElementById('vehicle-form').reset();
                 await loadVehicles();
-            } catch(e) { alert(e.message); }
+            } catch(e) { await showAlert(e.message); }
         };
 
         async function loadVehicles() {
@@ -194,12 +199,26 @@
                                 <div style="font-weight:bold;">${v.license_plate}</div>
                                 <div style="font-size:0.75rem; color:var(--text-muted);">${v.make_model || 'Unknown Make'}</div>
                             </div>
-                            <span class="badge ${v.type}">${v.type}</span>
+                            <div style="display:flex; align-items:center; gap: 0.5rem;">
+                                <span class="badge ${v.type}">${v.type}</span>
+                                <button onclick="deleteVehicle(${v.id})" style="background: #ef4444; color: white; border: none; border-radius: 4px; padding: 0.25rem 0.5rem; cursor: pointer; font-size: 0.75rem;" title="Delete Vehicle & Free Slot if parked">Delete</button>
+                            </div>
                         </div>
                     `).join('');
                 }
             } catch(e) { console.error('Error loading vehicles', e); }
         }
+
+        window.deleteVehicle = async (id) => {
+            if (!(await showConfirm('Are you sure you want to delete this vehicle? Any active parking sessions for it will be ended.'))) return;
+            try {
+                await apiCall(`/vehicles/${id}`, 'DELETE');
+                await loadVehicles();
+                reloadUI(); // refresh active sessions and slots
+            } catch(e) {
+                await showAlert("Failed to delete vehicle: " + e.message);
+            }
+        };
 
         async function loadSessions() {
             const container = document.getElementById('sessions-container');
@@ -276,7 +295,7 @@
             const selectEl = document.getElementById('modal-vehicle-id');
             
             if (validVehicles.length === 0) {
-                alert(`You do not have any registered ${slotType}s to park in this slot.`);
+                showAlert(`You do not have any registered ${slotType}s to park in this slot.`);
                 return;
             }
 
@@ -299,13 +318,16 @@
             const t = document.getElementById('modal-action-type').value;
             const tContainer = document.getElementById('reserve-time-container');
             const tInput = document.getElementById('modal-time');
+            const dInput = document.getElementById('modal-duration-hours');
             
             if (t === 'later') {
                 tContainer.classList.remove('hidden');
                 tInput.required = true;
+                dInput.required = true;
             } else {
                 tContainer.classList.add('hidden');
                 tInput.required = false;
+                dInput.required = false;
             }
         };
 
@@ -317,12 +339,13 @@
                     driver_id: currentUser.id,
                     vehicle_id: document.getElementById('modal-vehicle-id').value,
                     action_type: document.getElementById('modal-action-type').value,
-                    time: document.getElementById('modal-time').value
+                    time: document.getElementById('modal-time').value,
+                    duration_hours: document.getElementById('modal-action-type').value === 'later' ? document.getElementById('modal-duration-hours').value : null
                 });
                 closeModal();
                 reloadUI();
             } catch(e) {
-                alert(e.message);
+                await showAlert(e.message);
             }
         };
 
@@ -330,7 +353,7 @@
             try {
                 await apiCall('/release', 'POST', { slot_id: slotId });
                 reloadUI();
-            } catch(e) { alert(e.message); }
+            } catch(e) { await showAlert(e.message); }
         };
 
         function reloadUI() {

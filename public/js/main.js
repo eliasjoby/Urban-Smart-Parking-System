@@ -2,13 +2,13 @@
 let currentUser = JSON.parse(localStorage.getItem('user')) || null;
 
 // Ensure authenticated
-function requireAuth(role) {
+async function requireAuth(role) {
     if (!currentUser) {
         window.location.href = '/login.html';
         return;
     }
     if (role && currentUser.role !== role) {
-        alert("Unauthorized access");
+        await showAlert("Unauthorized access");
         window.location.href = currentUser.role === 'admin' ? '/admin.html' : '/driver.html';
     }
 }
@@ -54,3 +54,79 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
 });
+
+// Custom Themed Modals
+window.showAlert = function(message) {
+    return new Promise((resolve) => createModal(message, false, resolve));
+};
+
+window.showConfirm = function(message) {
+    return new Promise((resolve) => createModal(message, true, resolve));
+};
+
+function createModal(message, isConfirm, resolve) {
+    const overlay = document.createElement('div');
+    Object.assign(overlay.style, {
+        position: 'fixed', top: '0', left: '0', right: '0', bottom: '0',
+        backgroundColor: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)',
+        display: 'flex', justifyContent: 'center', alignItems: 'center',
+        zIndex: '9999', opacity: '0', transition: 'opacity 0.2s ease'
+    });
+
+    const modal = document.createElement('div');
+    Object.assign(modal.style, {
+        background: '#0f172a', padding: '2rem', borderRadius: '12px',
+        maxWidth: '450px', width: '90%', border: '1px solid #334155',
+        boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
+        color: '#f8fafc', transform: 'scale(0.95)', transition: 'transform 0.2s ease'
+    });
+
+    const text = document.createElement('p');
+    Object.assign(text.style, {
+        marginBottom: '2rem', fontSize: '1.1rem', lineHeight: '1.5',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+    });
+    text.innerText = message;
+    modal.appendChild(text);
+
+    const btnContainer = document.createElement('div');
+    Object.assign(btnContainer.style, { display: 'flex', justifyContent: 'flex-end', gap: '1rem' });
+
+    const close = (val) => {
+        overlay.style.opacity = '0';
+        modal.style.transform = 'scale(0.95)';
+        setTimeout(() => { document.body.removeChild(overlay); resolve(val); }, 200);
+    };
+
+    if (isConfirm) {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.innerText = 'Cancel';
+        cancelBtn.className = 'btn btn-secondary';
+        Object.assign(cancelBtn.style, {
+            padding: '0.5rem 1.5rem', borderRadius: '8px', border: '1px solid #334155',
+            background: 'transparent', color: 'white', cursor: 'pointer'
+        });
+        cancelBtn.onclick = () => close(false);
+        btnContainer.appendChild(cancelBtn);
+    }
+
+    const okBtn = document.createElement('button');
+    okBtn.innerText = 'OK';
+    okBtn.className = 'btn';
+    Object.assign(okBtn.style, {
+        padding: '0.5rem 1.5rem', borderRadius: '8px', border: 'none',
+        background: '#22c55e', color: '#000', cursor: 'pointer', fontWeight: 'bold'
+    });
+    okBtn.onclick = () => close(true);
+    btnContainer.appendChild(okBtn);
+
+    modal.appendChild(btnContainer);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    // animate in
+    requestAnimationFrame(() => {
+        overlay.style.opacity = '1';
+        modal.style.transform = 'scale(1)';
+    });
+}

@@ -1,14 +1,17 @@
 {
   "name": "urban-smart-parking-management-system",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server/server.js",
   "scripts": {
+    "start": "node server/server.js",
+    "dev": "node server/server.js",
+    "db:wipe": "node server/wipe_db.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Urban Smart Parking Management System",
   "dependencies": {
     "body-parser": "^2.2.2",
     "cors": "^2.8.6",

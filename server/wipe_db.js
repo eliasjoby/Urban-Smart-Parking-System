@@ -1,8 +1,25 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 
+function resolveDatabaseUri() {
+    if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+    if (process.env.MYSQL_ADDON_URI) return process.env.MYSQL_ADDON_URI;
+
+    const host = process.env.MYSQL_ADDON_HOST;
+    const user = process.env.MYSQL_ADDON_USER;
+    const password = process.env.MYSQL_ADDON_PASSWORD;
+    const database = process.env.MYSQL_ADDON_DB;
+    const port = process.env.MYSQL_ADDON_PORT || '3306';
+
+    if (host && user && password && database) {
+        return `mysql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
+    }
+
+    return 'mysql://user:pass@localhost:3306/parking';
+}
+
 const pool = mysql.createPool({
-    uri: process.env.DATABASE_URL || 'mysql://user:pass@localhost:3306/parking',
+    uri: resolveDatabaseUri(),
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0

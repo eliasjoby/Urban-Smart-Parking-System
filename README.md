@@ -23,6 +23,10 @@ Urban Smart Parking Management System is designed to solve common parking manage
 
 ## Core Features
 
+### Currency
+
+- All parking prices, fees, and dues in the UI are displayed in INR (Indian Rupees, ₹).
+
 ### Driver Features
 
 - User signup and login

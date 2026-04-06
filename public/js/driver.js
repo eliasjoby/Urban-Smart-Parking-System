@@ -141,7 +141,7 @@ async function loadDiscovery() {
                     </div>
                     <div style="background: rgba(0,0,0,0.3); padding: 0.5rem 1rem; border-radius: 8px; border: 1px solid #334155; text-align: center;">
                         <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">Rate</div>
-                        <div style="font-weight: bold; color: #22c55e;">$${parseFloat(lot.price_per_hour || 0).toFixed(2)}/hr</div>
+                        <div style="font-weight: bold; color: #22c55e;">₹${parseFloat(lot.price_per_hour || 0).toFixed(2)}/hr</div>
                     </div>
                 </div>
                 <div class="slots-grid">${slotButtons}</div>
@@ -232,7 +232,7 @@ window.loadDues = async function() {
         const headDuesAmt = document.getElementById('header-dues-amt');
 
         headDues.style.display = 'flex';
-        headDuesAmt.innerText = `$${dues.toFixed(2)}`;
+        headDuesAmt.innerText = `₹${dues.toFixed(2)}`;
         if (dues <= 0) {
             headDues.style.color = 'var(--text-muted)';
         } else {
@@ -241,7 +241,7 @@ window.loadDues = async function() {
 
         if (dues > 0) {
             duesSec.style.display = 'block';
-            duesAmt.innerText = `$${dues.toFixed(2)}`;
+            duesAmt.innerText = `₹${dues.toFixed(2)}`;
         } else {
             duesSec.style.display = 'none';
         }

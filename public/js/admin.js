@@ -42,7 +42,7 @@ async function loadUsers() {
                 <td>
                     <div style="font-weight:bold; font-size: 1.1rem;">${u.username}</div>
                     <div style="font-size:0.85rem; color:var(--text-muted); margin-top:0.25rem;">${u.phone || 'No phone provided'}</div>
-                    <div style="font-size:0.85rem; color:#ef4444; margin-top:0.25rem; font-weight: bold;">Due Fees: $${parseFloat(u.due_fees || 0).toFixed(2)}</div>
+                    <div style="font-size:0.85rem; color:#ef4444; margin-top:0.25rem; font-weight: bold;">Due Fees: ₹${parseFloat(u.due_fees || 0).toFixed(2)}</div>
                 </td>
                 <td>${vHtml}</td>
                 <td style="display:flex; flex-direction:column; gap:0.5rem;">
@@ -174,7 +174,7 @@ async function loadSessions() {
                 <td>${s.lot_name}</td>
                 <td style="font-family: monospace; font-weight: bold">${s.slot_number}</td>
                 <td style="font-weight: bold; color: #93c5fd;">${s.duration_hours || '-'}</td>
-                <td style="font-weight: bold; color: #22c55e;">${s.fee_charged !== null && s.fee_charged !== undefined ? '$'+parseFloat(s.fee_charged).toFixed(2) : '-'}</td>
+                <td style="font-weight: bold; color: #22c55e;">${s.fee_charged !== null && s.fee_charged !== undefined ? '₹'+parseFloat(s.fee_charged).toFixed(2) : '-'}</td>
                 <td style="font-size: 0.85rem">${new Date(s.entry_time).toLocaleString()}</td>
                 <td style="font-size: 0.85rem; color: ${s.exit_time ? 'inherit' : 'var(--text-muted)'}">${exTime}</td>
                 <td>${statusBadge}</td>
